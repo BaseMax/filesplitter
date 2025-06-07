@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/fatih/color"
 )
@@ -26,9 +30,9 @@ func logWarn(msg string) {
 
 func printBanner() {
 	color.Cyan(`
-📁 FileSplitter v1.0 by BaseMax
-📦 Split large files by lines or size with style!
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 FileSplitter v2.0 by BaseMax
+📦 Split massive files by lines or size with style!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `)
 }
 
@@ -40,6 +44,10 @@ func main() {
 	sizePerFile := flag.String("size", "", "Split by max size (e.g., 100MB, 500KB)")
 	outPrefix := flag.String("prefix", "part", "Output filename prefix")
 	outputDir := flag.String("outdir", ".", "Output directory")
+	fileExt := flag.String("ext", "txt", "Output file extension")
+	padWidth := flag.Int("pad", 3, "Zero padding width for file index")
+	timestamp := flag.Bool("ts", false, "Add timestamp to filenames")
+	dryRun := flag.Bool("dry", false, "Dry run mode (preview only)")
 
 	flag.Parse()
 
@@ -58,35 +66,55 @@ func main() {
 	stat, _ := file.Stat()
 	logInfo(fmt.Sprintf("📄 Input File: %s (%.2f MB)", *inputFile, float64(stat.Size())/(1024*1024)))
 
+	maxSizeBytes, err := parseSize(*sizePerFile)
+	if err != nil {
+		logWarn("Invalid size format: " + err.Error())
+		maxSizeBytes = 0
+	}
+
+	splitFile(file, *linesPerFile, maxSizeBytes, *outputDir, *outPrefix, *fileExt, *padWidth, *timestamp, *dryRun)
+}
+
+func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefix, ext string, padWidth int, useTS, dryRun bool) {
 	reader := bufio.NewReader(file)
-	writer := bufio.NewWriter(nil)
 	lineCount := 0
 	part := 1
 	var written int64 = 0
-	var maxSizeBytes int64 = parseSize(*sizePerFile)
-
 	var out *os.File
+	var writer *bufio.Writer
 
-	createNewPart := func() {
+	createNewPart := func() error {
 		if out != nil {
 			writer.Flush()
 			out.Close()
 		}
-		filename := filepath.Join(*outputDir, fmt.Sprintf("%s%d.txt", *outPrefix, part))
-		var err error
-		out, err = os.Create(filename)
-		if err != nil {
-			logError("Cannot create output file: " + err.Error())
-			os.Exit(1)
+		suffix := fmt.Sprintf("%0*d", padWidth, part)
+		if useTS {
+			suffix = fmt.Sprintf("%s_%s", suffix, time.Now().Format("20060102_150405"))
 		}
+		filename := filepath.Join(outputDir, fmt.Sprintf("%s%s.%s", prefix, suffix, ext))
+		if dryRun {
+			logInfo("[DryRun] Would create: " + filename)
+			return nil
+		}
+		f, err := os.Create(filename)
+		if err != nil {
+			return err
+		}
+		out = f
 		writer = bufio.NewWriter(out)
-		logInfo(fmt.Sprintf("✂️  Creating: %s", filename))
-		part++
+		logInfo("✂️  Creating: " + filename)
 		written = 0
 		lineCount = 0
+		part++
+		return nil
 	}
 
-	createNewPart()
+	err := createNewPart()
+	if err != nil {
+		logError("Unable to start: " + err.Error())
+		return
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -98,45 +126,57 @@ func main() {
 			break
 		}
 
-		if (*linesPerFile > 0 && lineCount >= *linesPerFile) || (maxSizeBytes > 0 && written+int64(len(line)) > maxSizeBytes) {
-			createNewPart()
+		if (maxLines > 0 && lineCount >= maxLines) || (maxSizeBytes > 0 && written+int64(len(line)) > maxSizeBytes) {
+			err := createNewPart()
+			if err != nil {
+				logError("Failed to create new part: " + err.Error())
+				break
+			}
 		}
 
-		writer.WriteString(line)
+		if !dryRun {
+			writer.WriteString(line)
+		}
 		lineCount++
 		written += int64(len(line))
 	}
 
-	writer.Flush()
-	if out != nil {
-		out.Close()
+	if !dryRun && writer != nil {
+		writer.Flush()
+		if out != nil {
+			out.Close()
+		}
 	}
 
 	logInfo("🎉 Done! All parts created.")
 }
 
-func parseSize(sizeStr string) int64 {
+func parseSize(sizeStr string) (int64, error) {
 	if sizeStr == "" {
-		return 0
+		return 0, nil
 	}
-	unit := sizeStr[len(sizeStr)-2:]
-	numStr := sizeStr[:len(sizeStr)-2]
+	sizeStr = strings.TrimSpace(strings.ToUpper(sizeStr))
+	re := regexp.MustCompile(`(?i)^(\d+(\.\d+)?)(KB|MB|GB|B)$`)
+	matches := re.FindStringSubmatch(sizeStr)
+	if len(matches) != 4 {
+		return 0, errors.New("invalid size format")
+	}
 
-	num, err := strconv.ParseFloat(numStr, 64)
+	num, err := strconv.ParseFloat(matches[1], 64)
 	if err != nil {
-		logWarn("Failed to parse size, ignoring size limit.")
-		return 0
+		return 0, err
 	}
 
-	switch unit {
-	case "KB", "kb":
-		return int64(num * 1024)
-	case "MB", "mb":
-		return int64(num * 1024 * 1024)
-	case "GB", "gb":
-		return int64(num * 1024 * 1024 * 1024)
+	switch matches[3] {
+	case "B":
+		return int64(num), nil
+	case "KB":
+		return int64(num * 1024), nil
+	case "MB":
+		return int64(num * 1024 * 1024), nil
+	case "GB":
+		return int64(num * 1024 * 1024 * 1024), nil
 	default:
-		logWarn("Unknown size unit, use KB/MB/GB.")
-		return 0
+		return 0, errors.New("unknown size unit")
 	}
 }
