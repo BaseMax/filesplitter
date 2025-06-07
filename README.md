@@ -32,7 +32,7 @@ It supports customizable output filename prefixes, extensions, zero-padded indic
 
 ## Installation
 
-Download the latest executable from the [Releases](https://github.com/BaseMax/filesplitter/releases) page or build from source:
+Download the latest source from the repository and build from source:
 
 ```bash
 git clone https://github.com/BaseMax/filesplitter.git
