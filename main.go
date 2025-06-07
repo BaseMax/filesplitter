@@ -28,10 +28,14 @@ func logWarn(msg string) {
 	color.Yellow("⚠️  %s", msg)
 }
 
+func logSuccess(msg string) {
+	color.Cyan("🎯 %s", msg)
+}
+
 func printBanner() {
 	color.Cyan(`
-📁 FileSplitter v2.0 by BaseMax
-📦 Split massive files by lines or size with style!
+📁 FileSplitter v2.6 by BaseMax
+📦 Split massive files by lines, size, or pattern with style!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `)
 }
@@ -42,12 +46,14 @@ func main() {
 	inputFile := flag.String("in", "", "Input file path (e.g., usernames.txt)")
 	linesPerFile := flag.Int("lines", 0, "Split by number of lines (e.g., 1000000)")
 	sizePerFile := flag.String("size", "", "Split by max size (e.g., 100MB, 500KB)")
+	pattern := flag.String("pattern", "", "Split file whenever this pattern is matched")
 	outPrefix := flag.String("prefix", "part", "Output filename prefix")
 	outputDir := flag.String("outdir", ".", "Output directory")
 	fileExt := flag.String("ext", "txt", "Output file extension")
 	padWidth := flag.Int("pad", 3, "Zero padding width for file index")
 	timestamp := flag.Bool("ts", false, "Add timestamp to filenames")
 	dryRun := flag.Bool("dry", false, "Dry run mode (preview only)")
+	quiet := flag.Bool("q", false, "Quiet mode (suppress logs)")
 
 	flag.Parse()
 
@@ -64,7 +70,9 @@ func main() {
 	defer file.Close()
 
 	stat, _ := file.Stat()
-	logInfo(fmt.Sprintf("📄 Input File: %s (%.2f MB)", *inputFile, float64(stat.Size())/(1024*1024)))
+	if !*quiet {
+		logInfo(fmt.Sprintf("📄 Input File: %s (%.2f MB)", *inputFile, float64(stat.Size())/(1024*1024)))
+	}
 
 	maxSizeBytes, err := parseSize(*sizePerFile)
 	if err != nil {
@@ -72,10 +80,19 @@ func main() {
 		maxSizeBytes = 0
 	}
 
-	splitFile(file, *linesPerFile, maxSizeBytes, *outputDir, *outPrefix, *fileExt, *padWidth, *timestamp, *dryRun)
+	var re *regexp.Regexp
+	if *pattern != "" {
+		re, err = regexp.Compile(*pattern)
+		if err != nil {
+			logError("Invalid regex pattern: " + err.Error())
+			os.Exit(1)
+		}
+	}
+
+	splitFile(file, *linesPerFile, maxSizeBytes, re, *outputDir, *outPrefix, *fileExt, *padWidth, *timestamp, *dryRun, *quiet)
 }
 
-func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefix, ext string, padWidth int, useTS, dryRun bool) {
+func splitFile(file *os.File, maxLines int, maxSizeBytes int64, pattern *regexp.Regexp, outputDir, prefix, ext string, padWidth int, useTS, dryRun, quiet bool) {
 	reader := bufio.NewReader(file)
 	lineCount := 0
 	part := 1
@@ -94,7 +111,9 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefi
 		}
 		filename := filepath.Join(outputDir, fmt.Sprintf("%s%s.%s", prefix, suffix, ext))
 		if dryRun {
-			logInfo("[DryRun] Would create: " + filename)
+			if !quiet {
+				logInfo("[DryRun] Would create: " + filename)
+			}
 			return nil
 		}
 		f, err := os.Create(filename)
@@ -103,7 +122,9 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefi
 		}
 		out = f
 		writer = bufio.NewWriter(out)
-		logInfo("✂️  Creating: " + filename)
+		if !quiet {
+			logInfo("✂️  Creating: " + filename)
+		}
 		written = 0
 		lineCount = 0
 		part++
@@ -126,7 +147,9 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefi
 			break
 		}
 
-		if (maxLines > 0 && lineCount >= maxLines) || (maxSizeBytes > 0 && written+int64(len(line)) > maxSizeBytes) {
+		if (maxLines > 0 && lineCount >= maxLines) ||
+			(maxSizeBytes > 0 && written+int64(len(line)) > maxSizeBytes) ||
+			(pattern != nil && pattern.MatchString(line)) {
 			err := createNewPart()
 			if err != nil {
 				logError("Failed to create new part: " + err.Error())
@@ -148,7 +171,9 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, outputDir, prefi
 		}
 	}
 
-	logInfo("🎉 Done! All parts created.")
+	if !quiet {
+		logSuccess("🎉 Done! All parts created.")
+	}
 }
 
 func parseSize(sizeStr string) (int64, error) {
