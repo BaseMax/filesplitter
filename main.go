@@ -16,25 +16,16 @@ import (
 	"github.com/fatih/color"
 )
 
-func logInfo(msg string) {
-	color.Green("✅ %s", msg)
-}
+const bufSize = 128 * 1024 // 128KB buffer for I/O
 
-func logError(msg string) {
-	color.Red("❌ %s", msg)
-}
-
-func logWarn(msg string) {
-	color.Yellow("⚠️  %s", msg)
-}
-
-func logSuccess(msg string) {
-	color.Cyan("🎯 %s", msg)
-}
+func logInfo(msg string)    { color.Green("✅ %s", msg) }
+func logError(msg string)   { color.Red("❌ %s", msg) }
+func logWarn(msg string)    { color.Yellow("⚠️  %s", msg) }
+func logSuccess(msg string) { color.Cyan("🎯 %s", msg) }
 
 func printBanner() {
 	color.Cyan(`
-📁 FileSplitter v2.6 by BaseMax
+📁 FileSplitter v1.0 by Max Base
 📦 Split massive files by lines, size, or pattern with style!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `)
@@ -93,7 +84,7 @@ func main() {
 }
 
 func splitFile(file *os.File, maxLines int, maxSizeBytes int64, pattern *regexp.Regexp, outputDir, prefix, ext string, padWidth int, useTS, dryRun, quiet bool) {
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReaderSize(file, bufSize)
 	lineCount := 0
 	part := 1
 	var written int64 = 0
@@ -121,7 +112,7 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, pattern *regexp.
 			return err
 		}
 		out = f
-		writer = bufio.NewWriter(out)
+		writer = bufio.NewWriterSize(out, bufSize)
 		if !quiet {
 			logInfo("✂️  Creating: " + filename)
 		}
@@ -138,18 +129,29 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, pattern *regexp.
 	}
 
 	for {
-		line, err := reader.ReadString('\n')
+		lineBytes, err := reader.ReadSlice('\n')
 		if err == io.EOF {
+			if len(lineBytes) > 0 {
+				if dryRun == false {
+					writer.Write(lineBytes)
+				}
+			}
 			break
 		}
 		if err != nil {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				if dryRun == false {
+					writer.Write(lineBytes)
+				}
+				continue
+			}
 			logError("Error reading line: " + err.Error())
 			break
 		}
 
 		if (maxLines > 0 && lineCount >= maxLines) ||
-			(maxSizeBytes > 0 && written+int64(len(line)) > maxSizeBytes) ||
-			(pattern != nil && pattern.MatchString(line)) {
+			(maxSizeBytes > 0 && written+int64(len(lineBytes)) > maxSizeBytes) ||
+			(pattern != nil && pattern.Match(lineBytes)) {
 			err := createNewPart()
 			if err != nil {
 				logError("Failed to create new part: " + err.Error())
@@ -158,10 +160,10 @@ func splitFile(file *os.File, maxLines int, maxSizeBytes int64, pattern *regexp.
 		}
 
 		if !dryRun {
-			writer.WriteString(line)
+			writer.Write(lineBytes)
 		}
 		lineCount++
-		written += int64(len(line))
+		written += int64(len(lineBytes))
 	}
 
 	if !dryRun && writer != nil {
